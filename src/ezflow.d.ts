@@ -159,4 +159,10 @@ declare module ezflow {
   export function useDispatcher(action: Function): IDispatcher;
   export function useDispatcher(actions: Function[]): IDispatcher[];
   export function useDispatcher(actions: IActionMap): IDispatcherMap;
+  export function useSelector(
+    selectors: string | IStateSelector<any, any> | Function
+  ): any;
+  export function useSelector(
+    selectors: string[] | IStateSelector<any, any>[] | Function[]
+  ): any[];
 }
