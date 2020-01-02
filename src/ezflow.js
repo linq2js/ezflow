@@ -4,360 +4,26 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState
 } from "react";
 
-const CancellationToken = {};
-const initAction = "@@init";
+const storeContext = createContext();
+const InitAction = () => {};
+const defaultSubscriptionKey = () => {};
 const effectHook = useEffect;
 const callbackHook = useCallback;
-const storeContext = createContext();
-
-let uniqueId = 1;
+const memoHook = useMemo;
 let defaultStore;
 
-function getFuncId(func) {
-  if (!func.__id) {
-    func.__id = uniqueId++;
-  }
-  return func.__id;
-}
+export class CancelError extends Error {}
 
-export function createStore(reducer = (state = {}) => state) {
-  let state = reducer(undefined, initAction);
-  const dispatchedObjects = new Map();
-  const subscriptions = new Set();
-  const store = {
-    dispose() {
-      subscriptions.clear();
-      dispatchedObjects.clear();
-      return store;
-    },
-    flow(...flows) {
-      flows.forEach(flow => {
-        if (dispatchedObjects.has(flow)) return;
-        const task = createTask(flow, store, { autoStart: false });
-        dispatchedObjects.set(flow, task);
-        task.start();
-      });
-      return store;
-    },
-    subscribe(subscription) {
-      subscriptions.add(subscription);
-      return () => {
-        subscriptions.delete(subscription);
-      };
-    },
-    getState() {
-      return state;
-    },
-    dispatch(action, payload) {
-      let listeners = dispatchedObjects.get(action);
-      if (!listeners) {
-        listeners = new Set();
-        dispatchedObjects.set(action, listeners);
-      }
-      listeners.dispatched = true;
-      listeners.payload = payload;
+export const Loading = () => {};
 
-      const nextState = reducer(state, action, payload);
-      if (nextState !== state) {
-        state = nextState;
-        // notify
-        for (const subscription of subscriptions) {
-          subscription({ state, action, payload });
-        }
-      }
+export const Failure = () => {};
 
-      for (const listener of listeners) {
-        listener(payload);
-      }
-      return store;
-    },
-    dispatched(action) {
-      const dispatchedObject = dispatchedObjects.get(action);
-      return dispatchedObject && dispatchedObject.dispatched === true;
-    },
-    listen(action, callback) {
-      let dispatchedObject = dispatchedObjects.get(action);
-      if (!dispatchedObject) {
-        dispatchedObject = new Set();
-        dispatchedObjects.set(action, dispatchedObject);
-      }
-
-      dispatchedObject.add(callback);
-
-      return () => dispatchedObject.delete(callback);
-    }
-  };
-  return store;
-}
-
-export function createTask(flow, store, options) {
-  const cancelSubscriptions = new Set();
-  const { autoStart = true, props } = options || {};
-  let runningTasks = new Map();
-  let isCancelled = false;
-  let promiseResolve;
-
-  const context = {
-    ...props,
-    flow: store.flow,
-    safe,
-    cancelled,
-    latest,
-    first,
-    every,
-    race,
-    all,
-    action,
-    delay,
-    dispatch,
-    select
-  };
-
-  Object.keys(context).forEach(key => {
-    if (typeof context[key] === "function") {
-      context[key] = wrap(context[key]);
-    }
-  });
-
-  const promise = new Promise(async resolve => {
-    promiseResolve = resolve;
-  });
-
-  function wrap(method) {
-    return (...args) => {
-      if (isCancelled) {
-        throw CancellationToken;
-      }
-      return method(...args);
-    };
-  }
-
-  function dispatch(effectOrAction, ...args) {
-    if (typeof effectOrAction === "function") {
-      return dispatchEffect(effectOrAction, ...args);
-    }
-    return store.dispatch(effectOrAction, ...args);
-  }
-
-  function dispatchEffect(effect, ...args) {
-    return effect(context, ...args);
-  }
-
-  function findRunningTask(action, flow, notFound, found) {
-    const flowId = getFuncId(flow);
-    const key = `${action}_${flowId}`;
-    const existingTask = runningTasks.get(key);
-    if (existingTask) {
-      const replaceTask = found && found(existingTask);
-      if (replaceTask) {
-        runningTasks.set(key, replaceTask);
-      }
-    } else if (notFound) {
-      const newTask = notFound();
-      if (newTask) {
-        runningTasks.set(key, newTask);
-      }
-    }
-  }
-
-  function select(selectors) {
-    const state = store.getState();
-    if (!selectors) return state;
-    if (Array.isArray(selectors)) {
-      return selectors.map(selector => getValue(state, selector));
-    }
-    return getValue(state, selectors);
-  }
-
-  function safe(f, defaultValue) {
-    if (isCancelled) return defaultValue;
-    return f();
-  }
-
-  function cancelled() {
-    return isCancelled;
-  }
-
-  function every(action, flow) {
-    store.listen(action, payload => {
-      createTask(flow, store, {
-        props: { $action: action, $payload: payload }
-      });
-    });
-  }
-
-  function first(action, flow) {
-    store.listen(action, payload => {
-      const props = { $action: action, $payload: payload };
-      findRunningTask(
-        action,
-        flow,
-        () => createTask(flow, store, {props}),
-        existing => {
-          if (existing.__started) return;
-          existing.cancel();
-          return createTask(flow, store, {props});
-        }
-      );
-    })
-  }
-
-  function latest(action, flow) {
-    store.listen(action, payload => {
-      const props = { $action: action, $payload: payload };
-      findRunningTask(
-        action,
-        flow,
-        () => createTask(flow, store, {props}),
-        existing => {
-          existing.cancel();
-          return createTask(flow, store, {props});
-        }
-      );
-    })
-  }
-
-  function getPromise(value) {
-    if (value instanceof Promise) return value;
-    if (typeof value === "function") {
-      return createTask(value, store);
-    }
-    return Promise.resolve(value);
-  }
-
-  function cancelPromises(promises) {
-    promises.forEach(
-      promise => typeof promise.cancel === "function" && promise.cancel()
-    );
-  }
-
-  async function race(map) {
-    const entries = Object.entries(map);
-    const result = {};
-    let resolved = false;
-    const promises = entries.map(([prop, value], index) =>
-      getPromise(value).then(payload => {
-        if (!resolved) {
-          resolved = true;
-          result.$key = entries[index][0];
-          result.$payload = payload;
-        }
-        result[entries[index][0]] = payload;
-
-        return payload;
-      })
-    );
-
-    try {
-      await Promise.race(promises);
-    } catch (error) {
-      cancelPromises(promises);
-      throw error;
-    }
-
-    return result;
-  }
-
-  async function all(map) {
-    const entries = Object.entries(map);
-    const promises = entries.map(([prop, value], index) => getPromise(value));
-    try {
-      const payloads = await Promise.all(promises);
-      const result = {};
-      payloads.forEach(
-        (payload, index) => (result[entries[index][0]] = payload)
-      );
-    } catch (error) {
-      cancelPromises(promises);
-      throw error;
-    }
-  }
-
-  function dispose() {
-    for (const cancelSubscription of cancelSubscriptions) {
-      cancelSubscription();
-    }
-    runningTasks.clear();
-  }
-
-  function action(a) {
-    let cancelSubscription;
-    return Object.assign(
-      new Promise(resolve => {
-        cancelSubscription = store.listen(a, resolve);
-        cancelSubscriptions.add(cancelSubscription);
-      }),
-      {
-        cancel() {
-          cancelSubscription();
-          cancelSubscriptions.delete(cancelSubscription);
-        }
-      }
-    );
-  }
-
-  async function start() {
-    try {
-      const result = await flow(context);
-      safe(() => promiseResolve(result));
-    } catch (e) {
-      if (e === CancellationToken) {
-        return;
-      }
-      throw e;
-    } finally {
-      dispose();
-    }
-  }
-
-  Object.assign(promise, {
-    cancel() {
-      isCancelled = true;
-      dispose();
-    },
-    start() {
-      promise.__started = true;
-      return start();
-    }
-  });
-
-  if (autoStart) {
-    promise.start();
-  }
-
-  return promise;
-}
-
-export function getDefaultStore() {
-  return defaultStore;
-}
-
-export function combineReducers(reducers) {
-  const entries = Object.entries(reducers);
-
-  return (state, action, payload) => {
-    let next = state;
-    for (const [prop, reducer] of entries) {
-      const prevValue =
-        typeof next === "undefined" || next === null ? undefined : next[prop];
-      const nextValue = reducer(prevValue, action, payload);
-      if (nextValue !== prevValue) {
-        if (next === state) {
-          next = { ...state };
-        }
-        next[prop] = nextValue;
-      }
-    }
-
-    return next;
-  };
-}
-
-export default function compose(...funcs) {
+export function compose(...funcs) {
   if (funcs.length === 0) {
     return arg => arg;
   }
@@ -431,18 +97,484 @@ export function useDispatch() {
   return store.dispatch;
 }
 
+export function useDispatchers(actions) {
+  const isMultiple = typeof actions !== "function";
+  const store = useStore();
+  if (!isMultiple) {
+    actions = [actions];
+  }
+  const dispatchers = memoHook(() => {
+    if (Array.isArray(actions)) {
+      return actions.map(action => payload => store.dispatch(action, payload));
+    }
+    const entries = Object.entries(actions);
+    const actionMap = {};
+    entries.forEach(([prop, action]) => {
+      actionMap[prop] = payload => store.dispatch(action, payload);
+    });
+    return actionMap;
+  }, actions);
+
+  return isMultiple ? dispatchers : dispatchers[0];
+}
+
 export function useFlow(...flows) {
   const store = useStore();
 
   effectHook(() => {
-    flows.forEach(flow => store.flow(flow));
+    store.flow(...flows);
   }, flows);
 }
 
-export function delay(inMilliseconds, value) {
-  return new Promise(resolve => setTimeout(resolve, inMilliseconds, value));
+export const delay = (inMilliseconds, value) =>
+  new Promise(resolve => setTimeout(resolve, inMilliseconds, value));
+
+export function createStore(rootReducer) {
+  const allSubscriptions = new WeakMap();
+  let propsReducer = undefined;
+  const props = {};
+  const mainReducer = (state, input) => {
+    if (rootReducer) {
+      state = rootReducer(state, input);
+    }
+
+    if (propsReducer) {
+      state = propsReducer(state, input);
+    }
+    return state;
+  };
+
+  let currentState = mainReducer(undefined, { action: InitAction });
+
+  function addReducer() {
+    let reducerChanged = false;
+    // reducer(prop, reducer)
+    // reducer(combinedReducers)
+    if (typeof arguments[0] !== "function") {
+      // reducer(prop, reducer)
+      if (arguments.length > 1) {
+        const [prop, reducer] = arguments;
+        if (!(prop in props) && props[prop] !== reducer) {
+          props[prop] = reducer;
+          reducerChanged = true;
+        }
+      } else {
+        // reducer(combinedReducers)
+        Object.entries(arguments[0]).forEach(([prop, reducer]) => {
+          if (!(prop in props) && props[prop] !== reducer) {
+            props[prop] = reducer;
+            reducerChanged = true;
+          }
+        });
+      }
+
+      if (reducerChanged) {
+        propsReducer = combineReducers(props);
+      }
+    } else {
+      for (let i = 0; i < arguments.length; i++) {
+        rootReducer = mergeReducer(rootReducer, arguments[i]);
+        reducerChanged = true;
+      }
+    }
+
+    if (reducerChanged) {
+      const nextState = mainReducer(undefined, { action: InitAction });
+      if (nextState !== currentState) {
+        currentState = nextState;
+        notify(defaultSubscriptionKey, {});
+      }
+    }
+  }
+
+  function mergeReducer(prev, next) {
+    return (state, input) => next(prev(state, input), input);
+  }
+
+  function flow(...flows) {
+    flows.forEach(action => {
+      if (!action.__task) {
+        action.__task = dispatch(action);
+      }
+    });
+    return flows[0].__task;
+  }
+
+  function getSubscriptions(key) {
+    let subscriptions = allSubscriptions.get(key);
+    if (!subscriptions) {
+      subscriptions = new Set();
+      allSubscriptions.set(key, subscriptions);
+    }
+    return subscriptions;
+  }
+
+  function subscribe() {
+    let key, subscription;
+    if (arguments.length > 1) {
+      key = arguments[0];
+      subscription = arguments[1];
+    } else {
+      key = defaultSubscriptionKey;
+      subscription = arguments[0];
+    }
+    const subscriptions = getSubscriptions(key);
+    subscriptions.add(subscription);
+    return function() {
+      subscriptions.delete(key);
+    };
+  }
+
+  function select(selector) {
+    return typeof selector === "function"
+      ? selector(currentState)
+      : currentState[selector];
+  }
+
+  function getState(selector) {
+    if (!selector) {
+      return currentState;
+    }
+
+    if (Array.isArray(selector)) {
+      return selector.map(select);
+    }
+
+    return select(selector);
+  }
+
+  function notify(key, event) {
+    const subscriptions = getSubscriptions(key);
+    subscriptions.dispatched = true;
+    Object.assign(subscriptions, event);
+    for (const subscription of subscriptions) {
+      subscription({ state: currentState, ...event });
+    }
+    return subscriptions;
+  }
+
+  function dispatch(action, payload, { cancellationToken, props } = {}) {
+    function handleAction(result, error, overwriteAction) {
+      const event = {
+        action: overwriteAction || action,
+        target: overwriteAction ? action : undefined,
+        payload,
+        result,
+        error
+      };
+      const nextState = mainReducer(currentState, event);
+      if (nextState !== currentState) {
+        currentState = nextState;
+        // notify to default subscription
+        notify(defaultSubscriptionKey, event);
+      }
+      if (!overwriteAction) {
+        notify(action, event);
+      }
+    }
+
+    return startTask(
+      action,
+      store,
+      handleAction,
+      payload,
+      props,
+      cancellationToken
+    );
+  }
+
+  const store = {
+    flow,
+    reducer: addReducer,
+    dispatch,
+    subscribe,
+    getState
+  };
+
+  return store;
+}
+
+export function combineReducers(reducers) {
+  const entries = Object.entries(reducers);
+
+  return (state, input) => {
+    let next = state;
+    for (const [prop, reducer] of entries) {
+      const prevValue =
+        typeof next === "undefined" || next === null ? undefined : next[prop];
+      const nextValue = reducer(prevValue, input);
+      if (nextValue !== prevValue) {
+        if (next === state) {
+          next = { ...state };
+        }
+        next[prop] = nextValue;
+      }
+    }
+
+    return next;
+  };
+}
+
+export function getDefaultStore() {
+  return defaultStore;
 }
 
 function getValue(state, selector) {
   return typeof selector === "function" ? selector(state) : state[selector];
+}
+
+function startTask(
+  action,
+  store,
+  handleAction,
+  payload,
+  props = {},
+  parentCancellationToken
+) {
+  const cancellationToken = createCancellationToken(parentCancellationToken);
+  const context = createActionContext(store, cancellationToken, props);
+  let promise;
+
+  try {
+    const result = action(context, payload);
+
+    // is async
+    if (result && typeof result.then === "function") {
+      // dispatch loading action
+      handleAction && handleAction(undefined, undefined, Loading);
+      promise = new Promise((resolve, reject) => {
+        result.then(
+          result => {
+            promise.result = result;
+            if (!cancellationToken.isCancelled()) {
+              handleAction && handleAction(result);
+              resolve(result);
+            }
+          },
+          error => {
+            if (error instanceof CancelError) {
+              return;
+            }
+            // dispatch failure action
+            handleAction && handleAction(undefined, error, Failure);
+            reject(error);
+          }
+        );
+      });
+      promise.async = true;
+    } else {
+      promise = Promise.resolve(result);
+      promise.async = false;
+      promise.result = result;
+      if (!cancellationToken.isCancelled()) {
+        handleAction && handleAction(result);
+      }
+    }
+
+    Object.assign(promise, {
+      cancel: cancellationToken.cancel
+    });
+  } catch (error) {
+    if (!(error instanceof CancelError)) {
+      handleAction && handleAction(undefined, error, Failure);
+      throw error;
+    }
+  }
+
+  return promise;
+}
+
+function createActionContext(store, cancellationToken, props) {
+  const { dispatch, subscribe, getState, flow, reducer } = store;
+
+  function addActionHandler(actions, handler, payload, processTask) {
+    (Array.isArray(actions) ? actions : [actions]).forEach(action => {
+      const data = {
+        lastRun: Number.MIN_VALUE
+      };
+      subscribe(action, event => {
+        processTask(data, () => {
+          data.lastRun = new Date().getTime();
+
+          data.prev = context.dispatch(
+            handler,
+            // is dynamic payload
+            typeof payload === "function" ? payload(event) : payload,
+            {
+              props: {
+                event
+              }
+            }
+          );
+        });
+      });
+    });
+  }
+
+  function throttle(actions, ms, handler, payload) {
+    return addActionHandler(actions, handler, payload, (data, next) => {
+      if (new Date().getTime() - data.lastRun >= ms) {
+        next();
+      }
+    });
+  }
+
+  function debounce(actions, ms, handler, payload) {
+    return addActionHandler(actions, handler, payload, (data, next) => {
+      if (data.prev) {
+        data.prev.cancel();
+      }
+      clearTimeout(data.timerId);
+      data.timerId = setTimeout(next, ms);
+    });
+  }
+
+  function latest(actions, handler, payload) {
+    return addActionHandler(actions, handler, payload, (data, next) => {
+      if (data.prev) {
+        data.prev.cancel();
+      }
+      next();
+    });
+  }
+
+  function every(actions, handler, payload) {
+    addActionHandler(actions, handler, payload, (data, next) => next());
+  }
+
+  function action(actions) {
+    return Promise.race(
+      (Array.isArray(actions) ? actions : [actions]).map(action => {
+        return new Promise(resolve => {
+          const unsubscribe = subscribe(action, ({ result, payload }) => {
+            unsubscribe();
+            resolve({ action, payload, result });
+          });
+        });
+      })
+    );
+  }
+
+  function lazy(...lazyActions) {
+    let resolvedActions;
+    let loading = false;
+    const queue = [];
+    const invoke = wrapMethod(
+      (action, context, payload) => action(context, payload),
+      cancellationToken
+    );
+
+    function loadLazyActions() {
+      if (loading) return;
+      loading = true;
+      Promise.all(lazyActions.map(lazyAction => lazyAction())).then(result => {
+        resolvedActions = result.map(x => x.default || x);
+        while (queue.length) {
+          const [context, payload] = queue.shift();
+          resolvedActions.forEach(action => invoke(action, context, payload));
+        }
+      });
+    }
+
+    return wrapMethod((context, payload) => {
+      if (resolvedActions) {
+        resolvedActions.forEach(action => invoke(action, context, payload));
+      } else {
+        queue.push([context, payload]);
+        loadLazyActions();
+      }
+    }, cancellationToken);
+  }
+
+  async function race(map) {
+    const entries = Object.entries(map);
+    const result = {};
+    let lastKey;
+    await Promise.race(
+      entries.map(([key, value]) =>
+        Promise.resolve(value).then(value => {
+          lastKey = key;
+          result[key] = value;
+        })
+      )
+    );
+    result.$key = lastKey;
+    return result;
+  }
+
+  async function all(map) {
+    const entries = Object.entries(map);
+    const result = {};
+    await Promise.all(
+      entries.map(([key, value]) =>
+        Promise.resolve(value).then(value => {
+          result[key] = value;
+        })
+      )
+    );
+    return result;
+  }
+
+  const context = Object.assign(
+    wrapContextMethods(
+      {
+        dispatch(action, payload, options) {
+          return dispatch(action, payload, {
+            cancellationToken,
+            ...options
+          });
+        },
+        select: getState,
+        lazy,
+        flow,
+        throttle,
+        latest,
+        debounce,
+        every,
+        action,
+        race,
+        all,
+        delay,
+        reducer
+      },
+      cancellationToken
+    ),
+    props
+  );
+
+  return context;
+}
+
+function wrapMethod(method, cancellationToken) {
+  return (...args) => {
+    if (cancellationToken.isCancelled()) {
+      throw new CancelError();
+    }
+    return method(...args);
+  };
+}
+
+function wrapContextMethods(context, cancellationToken) {
+  Object.entries(context).forEach(([prop, method]) => {
+    if (typeof method === "function") {
+      context[prop] = wrapMethod(method, cancellationToken);
+    }
+  });
+
+  return context;
+}
+
+function createCancellationToken(parentCancellationToken) {
+  let isCancelled = false;
+  return {
+    isCancelled() {
+      return (
+        isCancelled ||
+        (parentCancellationToken && parentCancellationToken.isCancelled())
+      );
+    },
+    cancel() {
+      isCancelled = true;
+    }
+  };
 }
