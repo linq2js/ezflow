@@ -236,6 +236,8 @@ export function createStore(rootReducer) {
         notify(defaultSubscriptionKey, {});
       }
     }
+
+    return store;
   }
 
   function mergeReducer(prev, next) {
@@ -311,7 +313,7 @@ export function createStore(rootReducer) {
     const subscriptions = getSubscriptions(key);
     subscriptions.add(subscription);
     return function() {
-      subscriptions.delete(key);
+      subscriptions.delete(subscription);
     };
   }
 
@@ -820,14 +822,17 @@ function createActionContext(store, cancellationToken, props) {
   async function race(map) {
     const entries = Object.entries(map);
     const result = {};
-    let lastKey;
-    await Promise.race(
-      entries.map(([key, value]) =>
-        Promise.resolve(value).then(value => {
-          lastKey = key;
-          result[key] = value;
-        })
-      )
+    const promises = entries.map(([key, value]) =>
+      Promise.resolve(value).then(value => {
+        lastKey = key;
+        result[key] = value;
+      })
+    );
+    let lastKey = undefined;
+    await Promise.race(promises);
+    // cancel others
+    promises.forEach(
+      promise => typeof promise.cancel === "function" && promise.cancel()
     );
     result.$key = lastKey;
     return result;

@@ -182,3 +182,81 @@ test("action dispatching statuses", async () => {
   await delay(60);
   expect(store.getState().data1).toBe("error:cannot load data1");
 });
+
+test("race()", async () => {
+  let loggedTimes = 0;
+  const ChangeProfile = () => {};
+  const Login = () => {};
+  const Logout = () => {};
+  const LoadProfile = async ({ delay }, username) => {
+    await delay(200);
+    return { username, isLoggedIn: true };
+  };
+  const UserLoginFlow = async ({ dispatch, action, race }) => {
+    while (true) {
+      const { payload: username } = await action(Login);
+
+      const { $key, profile } = await race({
+        profile: dispatch(LoadProfile, username),
+        logout: action(Logout)
+      });
+      // user logout before profile loading progress done
+      if ($key === "profile") {
+        dispatch(ChangeProfile, {
+          ...profile,
+          loggedTimes: ++loggedTimes
+        });
+      }
+      // await Login action dispatched
+      await action(Logout);
+      dispatch(ChangeProfile, undefined);
+    }
+  };
+  const reducer = (state, { action, payload }) => {
+    if (action === ChangeProfile) {
+      return {
+        ...state,
+        profile: payload
+      };
+    }
+    return state;
+  };
+  store.reducer(reducer);
+  store.flow(UserLoginFlow);
+  store.dispatch(Login, "admin");
+  await delay(300);
+  expect(store.getState()).toEqual({
+    profile: {
+      username: "admin",
+      isLoggedIn: true,
+      loggedTimes: 1
+    },
+    count: 0
+  });
+  // cannot login with other account
+  store.dispatch(Login, "test");
+  await delay(300);
+  expect(store.getState()).toEqual({
+    profile: {
+      username: "admin",
+      isLoggedIn: true,
+      loggedTimes: 1
+    },
+    count: 0
+  });
+  // logout
+  store.dispatch(Logout);
+  await delay(100);
+  expect(store.getState()).toEqual({
+    count: 0
+  });
+  // login again
+  store.dispatch(Login, "admin");
+  await delay(50);
+  // logout before profile loading progress finished
+  store.dispatch(Logout);
+  await delay(300);
+  expect(store.getState()).toEqual({
+    count: 0
+  });
+});

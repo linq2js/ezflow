@@ -134,10 +134,71 @@ const App = AppContainer(({ count, increase }) => {
 render(<App />, document.getElementById("root"));
 ```
 
-## Handling async action
-```jsx harmony
-import React from "react";
-import { render } from "react-dom";
-import { createDefaultStore, connect } from "ezflow";
+## Handling async action ([codesandbox](https://codesandbox.io/s/ezflow-example-async-action-k4xc6))
 
+```jsx harmony
+import React, { useRef } from "react";
+import ReactDOM from "react-dom";
+import {
+  createDefaultStore,
+  Loading,
+  delay,
+  useDispatch,
+  useSelector
+} from "ezflow";
+
+const LoadData = async (context, searchTerm) => {
+  await delay(1000);
+  return `Results of ${searchTerm}`;
+};
+
+const initialState = {
+  loading: "",
+  data: "There is no data"
+};
+
+const reducer = (state = initialState, params) => {
+  const { action, target, result, payload } = params;
+
+  // Loading action will be triggered automatically whenever async action is dispatched
+  if (action === Loading && target === LoadData) {
+    return {
+      loading: `Fetching for ${payload}...`
+    };
+  } else if (action === LoadData) {
+    return {
+      ...state,
+      loading: undefined,
+      data: result
+    };
+  }
+
+  return state;
+};
+
+createDefaultStore(reducer);
+
+function App() {
+  const [loading, data] = useSelector(["loading", "data"]);
+  const dispatch = useDispatch();
+  const inputRef = useRef();
+
+  function handleLoad() {
+    dispatch(LoadData, inputRef.current.value);
+    inputRef.current.value = "";
+  }
+
+  return (
+    <div className="App">
+      <p>
+        <input type="text" ref={inputRef} placeholder="Type something" />
+        <button onClick={handleLoad}>Load</button>
+      </p>
+      <div>{loading ? loading : data}</div>
+    </div>
+  );
+}
+
+const rootElement = document.getElementById("root");
+ReactDOM.render(<App />, rootElement);
 ```
