@@ -1,6 +1,10 @@
 import {
   createContext,
   createElement,
+  Fragment,
+  lazy as reactLazy,
+  memo,
+  Suspense,
   useCallback,
   useContext,
   useEffect,
@@ -16,12 +20,15 @@ const effectHook = useEffect;
 const callbackHook = useCallback;
 const memoHook = useMemo;
 let defaultStore;
+let lastStore;
 
 export class CancelError extends Error {}
 
 export const Loading = () => {};
 
 export const Failure = () => {};
+
+export const UpdateBranch = () => {};
 
 export function compose(...funcs) {
   if (funcs.length === 0) {
@@ -49,9 +56,37 @@ export function Provider({ store, children }) {
   });
 }
 
-export function useStore() {
+export function useStore(customizer) {
   const localStore = useContext(storeContext);
-  return localStore || defaultStore;
+  const store = localStore || defaultStore || lastStore;
+
+  effectHook(() => {
+    if (typeof customizer === "function") {
+      customizer(store);
+    } else if (customizer) {
+      if (customizer.flow) {
+        store.flow(
+          ...(Array.isArray(customizer.flow)
+            ? customizer.flow
+            : [customizer.flow])
+        );
+      }
+
+      if (customizer.reducer) {
+        store.reducer(
+          ...(Array.isArray(customizer.reducer)
+            ? customizer.reducer
+            : [customizer.reducer])
+        );
+      }
+    }
+  }, [store]);
+  return store;
+}
+
+export function useStateUpdater(branchName) {
+  const store = useStore();
+  return store.updater(branchName);
 }
 
 export function useSelector(selectors) {
@@ -97,7 +132,7 @@ export function useDispatch() {
   return store.dispatch;
 }
 
-export function useDispatchers(actions) {
+export function useDispatcher(actions) {
   const isMultiple = typeof actions !== "function";
   const store = useStore();
   if (!isMultiple) {
@@ -131,6 +166,8 @@ export const delay = (inMilliseconds, value) =>
 
 export function createStore(rootReducer) {
   const allSubscriptions = new WeakMap();
+  const mergedReducers = new WeakSet();
+  const stateUpdaters = new Map();
   let propsReducer = undefined;
   const props = {};
   const mainReducer = (state, input) => {
@@ -145,6 +182,15 @@ export function createStore(rootReducer) {
   };
 
   let currentState = mainReducer(undefined, { action: InitAction });
+
+  function getUpdater(branch) {
+    let updater = stateUpdaters.get(branch);
+    if (!updater) {
+      stateUpdaters.set(branch, (updater = createUpdater(store, branch)));
+      addReducer(branch, updater.reducer);
+    }
+    return updater;
+  }
 
   function addReducer() {
     let reducerChanged = false;
@@ -172,7 +218,12 @@ export function createStore(rootReducer) {
         propsReducer = combineReducers(props);
       }
     } else {
+      // reducer(...reducers);
       for (let i = 0; i < arguments.length; i++) {
+        if (mergedReducers.has(arguments[i])) {
+          continue;
+        }
+        mergedReducers.add(arguments[i]);
         rootReducer = mergeReducer(rootReducer, arguments[i]);
         reducerChanged = true;
       }
@@ -192,12 +243,51 @@ export function createStore(rootReducer) {
   }
 
   function flow(...flows) {
-    flows.forEach(action => {
-      if (!action.__task) {
-        action.__task = dispatch(action);
+    flows.forEach(f => {
+      if (!f.__tasks) {
+        f.__tasks = new WeakMap();
+      }
+
+      if (!f.__tasks.has(store)) {
+        f.__tasks.set(store, dispatch(f));
       }
     });
-    return flows[0].__task;
+
+    if (flows.length === 1) {
+      return flows[0].__tasks.get(store);
+    }
+
+    let isCancelled = false;
+    let promise;
+
+    function createPromise() {
+      if (promise) {
+        return promise;
+      }
+      return (promise = Promise.all(flows.map(f => f.__tasks.get(store))));
+    }
+    const multipleTaskWrapper = {
+      get then() {
+        return createPromise().then;
+      },
+      get catch() {
+        return createPromise().catch;
+      },
+      get finally() {
+        return createPromise().finally;
+      },
+      cancel() {
+        if (isCancelled) {
+          return;
+        }
+        isCancelled = true;
+        flows.forEach(f => f.__tasks.get(store).cancel());
+      }
+    };
+
+    flows.forEach((f, i) => (multipleTaskWrapper[i] = f.__tasks.get(store)));
+
+    return multipleTaskWrapper;
   }
 
   function getSubscriptions(key) {
@@ -283,13 +373,22 @@ export function createStore(rootReducer) {
     );
   }
 
-  const store = {
+  function dispatchOnce(action, payload, options) {
+    if (action.__dispatchedResult) {
+      return action.__dispatchedResult;
+    }
+    return (action.__dispatchedResult = dispatch(action, payload, options));
+  }
+
+  const store = (lastStore = {
     flow,
     reducer: addReducer,
     dispatch,
+    dispatchOnce,
     subscribe,
-    getState
-  };
+    getState,
+    updater: getUpdater
+  });
 
   return store;
 }
@@ -317,6 +416,191 @@ export function combineReducers(reducers) {
 
 export function getDefaultStore() {
   return defaultStore;
+}
+
+export function connect(specs) {
+  const { select = {}, dispatch = {}, flow, reducer } = specs || {};
+  const isCustomizableSelect = typeof select === "function";
+  const isCustomizableDispatch = typeof select === "function";
+  return comp => {
+    const memoizedComp = memo(comp);
+    return props => {
+      const selectEntries = Object.entries(
+        isCustomizableSelect ? select(props) : select
+      );
+      const store = useStore({ flow, reducer });
+
+      const dispatchers = memoHook(
+        () => {
+          if (isCustomizableDispatch) {
+            return dispatch(props, store.dispatch);
+          }
+          const result = {};
+          Object.entries(dispatch).forEach(([prop, action]) => {
+            result[prop] = payload => store.dispatch(action, payload);
+          });
+          return result;
+        },
+        isCustomizableDispatch ? [props] : []
+      );
+      const selectEntriesCacheKey = flat(selectEntries);
+      const selectedValues = useSelector(selectEntries.map(x => x[1]));
+
+      const newProps = memoHook(
+        () => {
+          const result = isCustomizableSelect
+            ? {
+                ...dispatchers
+              }
+            : { ...props, ...dispatchers };
+          selectedValues.forEach(
+            (value, index) => (result[selectEntries[index][0]] = value)
+          );
+          return result;
+        },
+        isCustomizableSelect
+          ? // props should add to dependency list
+            selectEntriesCacheKey.concat(props).concat(dispatchers)
+          : selectEntriesCacheKey.concat(dispatchers)
+      );
+      return createElement(memoizedComp, newProps);
+    };
+  };
+}
+
+export function useCallbacks(inputs, ...callbacks) {
+  return memoHook(() => callbacks, inputs || []);
+}
+
+export function dispatchOnMount(action, payload, inputs = []) {
+  const dispatch = useDispatch();
+
+  effectHook(() => {
+    dispatch(action, payload);
+  }, inputs);
+}
+
+export function dispatchOnMountIf(condition, action, payload, inputs = []) {
+  const dispatch = useDispatch();
+
+  effectHook(() => {
+    if (typeof condition === "function") {
+      if (!condition()) return;
+    } else if (!condition) {
+      return;
+    }
+    dispatch(action, payload);
+  }, inputs);
+}
+
+export function createSelector(...args) {
+  const selector = args.pop();
+  const inputSelectors = args;
+  let lastInputValues;
+  let lastResult;
+  return function(...inputs) {
+    const inputValues = inputSelectors.map(inputSelector =>
+      inputSelector(...inputs)
+    );
+    if (
+      !lastInputValues ||
+      lastInputValues.some((value, index) => value !== inputValues[index])
+    ) {
+      lastInputValues = inputValues;
+      lastResult = selector(...inputValues);
+    }
+    return lastResult;
+  };
+}
+
+export function dispatchOnUnmount(action, payload, inputs = []) {
+  const dispatch = useDispatch();
+
+  effectHook(
+    () => () => {
+      dispatch(action, payload);
+    },
+    inputs
+  );
+}
+
+export function dispatchOnUnmountIf(condition, action, payload, inputs = []) {
+  const dispatch = useDispatch();
+
+  effectHook(
+    () => () => {
+      if (typeof condition === "function") {
+        if (!condition()) return;
+      } else if (!condition) {
+        return;
+      }
+      dispatch(action, payload);
+    },
+    inputs
+  );
+}
+
+export function lazy(...lazyActions) {
+  let resolvedActions;
+  let loading = false;
+  const queue = [];
+  const invoke = (action, context, payload) => action(context, payload);
+
+  function loadLazyActions() {
+    if (loading) return;
+    loading = true;
+    Promise.all(lazyActions.map(lazyAction => lazyAction())).then(result => {
+      resolvedActions = result.map(x => x.default || x);
+      while (queue.length) {
+        const [context, payload] = queue.shift();
+        resolvedActions.forEach(action => invoke(action, context, payload));
+      }
+    });
+  }
+
+  return (context, payload) => {
+    if (resolvedActions) {
+      resolvedActions.forEach(action => invoke(action, context, payload));
+    } else {
+      queue.push([context, payload]);
+      loadLazyActions();
+    }
+  };
+}
+
+export function loadableComponent(
+  componentImport,
+  { onLoading, onLoaded, ...options } = {}
+) {
+  const lazyComponent = reactLazy(componentImport);
+  const loadingAction = () => ({ dispatch }) => dispatch(onLoading);
+  const loadedAction = () => ({ dispatch }) => dispatch(onLoaded);
+  const loadedComponent = () => {
+    const store = useStore();
+    store.dispatchOnce(loadedAction);
+    return createElement(Fragment);
+  };
+  return function(props) {
+    const store = useStore();
+    onLoading && store.dispatchOnce(loadingAction);
+
+    return createElement(
+      Suspense,
+      {
+        fallback: "",
+        ...options
+      },
+      createElement(lazyComponent, props),
+      ...(onLoaded ? [createElement(loadedComponent)] : [])
+    );
+  };
+}
+
+function flat(array) {
+  return array.reduce((seed, item) => {
+    seed.concat(item);
+    return seed;
+  }, []);
 }
 
 function getValue(state, selector) {
@@ -384,8 +668,86 @@ function startTask(
   return promise;
 }
 
+function createUpdater(store, branch) {
+  const reducer = (state = {}, { action, payload: changes }) => {
+    let next = state;
+    if (action === UpdateBranch) {
+      changes.forEach(({ method, prop, value }) => {
+        if (method === "merge") {
+          Object.keys(value).forEach(key => {
+            if (next[key] !== value[key]) {
+              if (next === state) {
+                next = { ...state };
+              }
+              next[key] = value[key];
+            }
+          });
+        } else if (method === "set") {
+          // change all
+          if (!prop) {
+            if (next !== value) {
+              next = value;
+            }
+          }
+          // prop changed
+          else if (next[prop] !== value) {
+            if (next === state) {
+              next = {
+                ...state
+              };
+            }
+            next[prop] = value;
+          }
+        }
+      });
+    }
+    return next;
+  };
+  let changes = undefined;
+
+  function dispatch(changes) {
+    store.dispatch(UpdateBranch, changes);
+  }
+
+  const updater = function() {
+    if (!arguments.length) {
+      return store.getState(branch);
+    }
+    let change;
+    // batch update
+    if (typeof arguments[0] === "function") {
+      try {
+        changes = [];
+        arguments[0](updater);
+      } finally {
+        const copiedChanges = changes;
+        changes = undefined;
+        dispatch(copiedChanges);
+      }
+    }
+    // update(prop, value)
+    else if (arguments.length > 1) {
+      change = { method: "set", prop: arguments[0], value: arguments[1] };
+    } else {
+      change = { method: "merge", value: arguments[0] };
+    }
+
+    if (change) {
+      if (changes) {
+        changes.push(change);
+      } else {
+        dispatch([change]);
+      }
+    }
+    return updater;
+  };
+  return Object.assign(updater, {
+    reducer
+  });
+}
+
 function createActionContext(store, cancellationToken, props) {
-  const { dispatch, subscribe, getState, flow, reducer } = store;
+  const { dispatch, dispatchOnce, subscribe, getState, flow, reducer } = store;
 
   function addActionHandler(actions, handler, payload, processTask) {
     (Array.isArray(actions) ? actions : [actions]).forEach(action => {
@@ -455,37 +817,6 @@ function createActionContext(store, cancellationToken, props) {
     );
   }
 
-  function lazy(...lazyActions) {
-    let resolvedActions;
-    let loading = false;
-    const queue = [];
-    const invoke = wrapMethod(
-      (action, context, payload) => action(context, payload),
-      cancellationToken
-    );
-
-    function loadLazyActions() {
-      if (loading) return;
-      loading = true;
-      Promise.all(lazyActions.map(lazyAction => lazyAction())).then(result => {
-        resolvedActions = result.map(x => x.default || x);
-        while (queue.length) {
-          const [context, payload] = queue.shift();
-          resolvedActions.forEach(action => invoke(action, context, payload));
-        }
-      });
-    }
-
-    return wrapMethod((context, payload) => {
-      if (resolvedActions) {
-        resolvedActions.forEach(action => invoke(action, context, payload));
-      } else {
-        queue.push([context, payload]);
-        loadLazyActions();
-      }
-    }, cancellationToken);
-  }
-
   async function race(map) {
     const entries = Object.entries(map);
     const result = {};
@@ -520,6 +851,12 @@ function createActionContext(store, cancellationToken, props) {
       {
         dispatch(action, payload, options) {
           return dispatch(action, payload, {
+            cancellationToken,
+            ...options
+          });
+        },
+        dispatchOnce(action, payload, options) {
+          return dispatchOnce(action, payload, {
             cancellationToken,
             ...options
           });

@@ -1,11 +1,11 @@
 import React from "react";
 import fetch from "node-fetch";
+import imj from "imj";
 import {
-  useSelector,
   createDefaultStore,
   Loading,
   Failure,
-  useDispatchers
+  connect
 } from "../../src/ezflow";
 
 const initialState = {
@@ -35,34 +35,45 @@ const RootFlow = ({ debounce }) => {
   );
 };
 
-function reducer(state = initialState, { action, target, payload, result }) {
-  if (action === Loading && target === Search) {
-    return {
-      ...state,
-      fetchStatus: `fetching for ${payload}...`,
-      list: []
-    };
-  } else if (action === Failure && target === Search) {
-    return {
-      ...state,
-      fetchStatus: `errored: ${payload}`
-    };
-  } else if (action === Search) {
-    return {
-      ...state,
-      list: result,
-      fetchStatus: `Results from ${new Date().toLocaleString()}`
-    };
+const reducer = imj({
+  $default: initialState,
+  $when: [
+    ({ $1: { action, target } }) =>
+      action === Loading && target === Search
+        ? "fetching"
+        : action === Failure && target === Search
+        ? "error"
+        : action === Search
+        ? "result"
+        : "default",
+    {
+      fetching: {
+        fetchStatus: ({ $1 }) => `fetching for ${$1.payload}...`,
+        list: () => []
+      },
+      error: {
+        fetchStatus: ({ $1 }) => `errored: ${$1.payload}...`
+      },
+      result: {
+        list: ({ $1 }) => $1.result,
+        fetchStatus: () => `Results from ${new Date().toLocaleString()}`
+      }
+    }
+  ]
+});
+
+createDefaultStore(reducer);
+
+export default connect({
+  flow: RootFlow,
+  select: {
+    list: "list",
+    fetchStatus: "fetchStatus"
+  },
+  dispatch: {
+    search: StartSearch
   }
-  return state;
-}
-
-createDefaultStore(reducer).flow(RootFlow);
-
-export default function App() {
-  const [list, fetchStatus] = useSelector(["list", "fetchStatus"]);
-  const search = useDispatchers(StartSearch);
-
+})(({ list, fetchStatus, search }) => {
   function handleChange(e) {
     search(e.target.value);
   }
@@ -86,4 +97,4 @@ export default function App() {
       </ul>
     </div>
   );
-}
+});

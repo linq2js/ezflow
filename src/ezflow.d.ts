@@ -28,6 +28,7 @@ declare module ezflow {
 
   export interface IActionContext {
     dispatch: IDispatch;
+    dispatchOnce: IDispatch;
     every(
       actions: IAction | IAction[] | Function | Function[],
       listener: IAction | Function,
@@ -104,10 +105,12 @@ declare module ezflow {
   }
   export interface IStore<T> {
     dispatch: IDispatch;
+    dispatchOnce: IDispatch;
     getState: IGetState<T>;
     flow(...flows: Function[]): any;
     reducer(prop: string, reducer: IReducer<any>): IStore<T>;
     reducer(reducers: IReducer<T>[] | IReducerMap | IReducer<T>): IStore<T>;
+    updater(branch: string): IStateBranchUpdater;
   }
   export function delay<T>(ms: number, value?: T): Promise<T>;
 
@@ -165,4 +168,33 @@ declare module ezflow {
   export function useSelector(
     selectors: string[] | IStateSelector<any, any>[] | Function[]
   ): any[];
+
+  export interface IConnectSpecs {
+    select?:
+      | Function
+      | {
+          [key: string]: IStateSelector<any, any>;
+        };
+    dispatch?: Function | IDispatcherMap;
+    flow?: Function | Function[];
+    reducer?: IReducer<any> | [string, IReducer<any>] | IReducer<any>[];
+  }
+  export interface IContainer {
+    (comp: any): Function;
+  }
+  export function connect(specs: IConnectSpecs): IContainer;
+
+  export interface IStateBranchUpdater {
+    (prop: any, value: any): IStateBranchUpdater;
+    (props: any): IStateBranchUpdater;
+    (batch: (updater: IStateBranchUpdater) => any): IStateBranchUpdater;
+  }
+
+  export function createSelector(...funcs: Function[]): Function;
+
+  /**
+   * create a new function that wraps lazy import functions
+   * @param funcs
+   */
+  export function lazy(...funcs: Function[]): Function;
 }
