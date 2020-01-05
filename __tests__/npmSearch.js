@@ -6,20 +6,21 @@ import App from "../examples/NpmSearch/App";
 afterEach(cleanup);
 
 test("should fetching properly", async () => {
-
   const packageName = "ezflow";
   const { getByTestId } = render(<App />);
   const $searchInput = getByTestId("search-input");
 
-  fireEvent.change($searchInput, { target: { value: packageName } });
+  await act(async () => {
+    fireEvent.change($searchInput, { target: { value: packageName } });
 
-  await delay(300);
+    await delay(300);
 
-  expect(getDefaultStore().getState().fetchStatus).toBe(
-    `fetching for ${packageName}...`
-  );
+    expect(getDefaultStore().getState().fetchStatus).toBe(
+      `fetching for ${packageName}...`
+    );
 
-  await delay(2000);
+    await delay(2000);
+  });
 
   expect(getDefaultStore().getState()).toEqual({
     list: [

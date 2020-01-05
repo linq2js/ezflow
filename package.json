@@ -1,6 +1,6 @@
 {
   "name": "ezflow",
-  "version": "0.1.7",
+  "version": "0.1.11",
   "description": "Powerful React state management",
   "main": "src/ezflow.js",
   "types": "src/ezflow.d.ts",

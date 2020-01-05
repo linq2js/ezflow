@@ -28,6 +28,8 @@ export const Loading = () => {};
 
 export const Failure = () => {};
 
+export const Cancel = () => {};
+
 export const UpdateBranch = () => {};
 
 export function compose(...funcs) {
@@ -345,11 +347,15 @@ export function createStore(rootReducer) {
     return subscriptions;
   }
 
-  function dispatch(action, payload, { cancellationToken, props } = {}) {
+  function dispatch(
+    action,
+    payload,
+    { cancellationToken, props, target } = {}
+  ) {
     function handleAction(result, error, overwriteAction) {
       const event = {
         action: overwriteAction || action,
-        target: overwriteAction ? action : undefined,
+        target: overwriteAction ? action : target,
         payload,
         result,
         error
@@ -631,6 +637,7 @@ function startTask(
       promise = new Promise((resolve, reject) => {
         result.then(
           result => {
+            promise.done = true;
             promise.result = result;
             if (!cancellationToken.isCancelled()) {
               handleAction && handleAction(result);
@@ -638,6 +645,7 @@ function startTask(
             }
           },
           error => {
+            promise.done = true;
             if (error instanceof CancelError) {
               return;
             }
@@ -647,10 +655,10 @@ function startTask(
           }
         );
       });
-      promise.async = true;
+      promise.sync = false;
     } else {
       promise = Promise.resolve(result);
-      promise.async = false;
+      promise.sync = true;
       promise.result = result;
       if (!cancellationToken.isCancelled()) {
         handleAction && handleAction(result);
@@ -658,7 +666,12 @@ function startTask(
     }
 
     Object.assign(promise, {
-      cancel: cancellationToken.cancel
+      cancel() {
+        if (promise.sync || promise.done || cancellationToken.isCancelled())
+          return;
+        cancellationToken.cancel();
+        store.dispatch(Cancel, payload, { target: action });
+      }
     });
   } catch (error) {
     if (!(error instanceof CancelError)) {
@@ -822,18 +835,20 @@ function createActionContext(store, cancellationToken, props) {
   async function race(map) {
     const entries = Object.entries(map);
     const result = {};
-    const promises = entries.map(([key, value]) =>
-      Promise.resolve(value).then(value => {
+    const cancels = [];
+    const promises = entries.map(([key, value]) => {
+      if (value instanceof Promise && typeof value.cancel === "function") {
+        cancels.push(value.cancel);
+      }
+      return Promise.resolve(value).then(value => {
         lastKey = key;
         result[key] = value;
-      })
-    );
+      });
+    });
     let lastKey = undefined;
     await Promise.race(promises);
     // cancel others
-    promises.forEach(
-      promise => typeof promise.cancel === "function" && promise.cancel()
-    );
+    cancels.forEach(cancel => cancel());
     result.$key = lastKey;
     return result;
   }

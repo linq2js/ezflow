@@ -1,4 +1,4 @@
-import { createStore, delay, Failure, Loading } from "../src/ezflow";
+import { createStore, delay, Failure, Loading, Cancel } from "../src/ezflow";
 
 const CounterReducer = (state = { count: 0 }, { action, payload = 1 }) => {
   if (action === Increase) {
@@ -185,6 +185,7 @@ test("action dispatching statuses", async () => {
 
 test("race()", async () => {
   let loggedTimes = 0;
+  const profileLoadingCancel = jest.fn();
   const ChangeProfile = () => {};
   const Login = () => {};
   const Logout = () => {};
@@ -212,12 +213,15 @@ test("race()", async () => {
       dispatch(ChangeProfile, undefined);
     }
   };
-  const reducer = (state, { action, payload }) => {
+  const reducer = (state, { action, payload, target }) => {
     if (action === ChangeProfile) {
       return {
         ...state,
         profile: payload
       };
+    }
+    if (action === Cancel && target === LoadProfile) {
+      profileLoadingCancel();
     }
     return state;
   };
@@ -256,6 +260,7 @@ test("race()", async () => {
   // logout before profile loading progress finished
   store.dispatch(Logout);
   await delay(300);
+  expect(profileLoadingCancel).toBeCalled();
   expect(store.getState()).toEqual({
     count: 0
   });

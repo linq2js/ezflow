@@ -131,6 +131,8 @@ declare module ezflow {
    */
   export function Loading(): any;
 
+  export function Cancel(): any;
+
   /**
    * This action will be dispatched once async action failed
    */
